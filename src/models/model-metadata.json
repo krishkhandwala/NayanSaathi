@@ -1,0 +1,34 @@
+{
+  "modelId": "nayansaathi-mobilenetv3-inr-int8",
+  "name": "NayanSaathi Indian Currency Classifier",
+  "version": "1.0.0",
+  "architecture": "MobileNetV3-Small",
+  "task": "single-note-classification",
+  "inputSize": [224, 224, 3],
+  "meanNormalization": [127.5, 127.5, 127.5],
+  "stdNormalization": [127.5, 127.5, 127.5],
+  "quantization": "INT8",
+  "fileSizeBytes": 15518976,
+  "compressedSizeMB": 14.8,
+  "targetInferenceLatencyMs": 35,
+  "confidenceThreshold": 0.85,
+  "minConsecutiveFrames": 3,
+  "labels": [
+    "INR_10",
+    "INR_20",
+    "INR_50",
+    "INR_100",
+    "INR_200",
+    "INR_500",
+    "INR_2000"
+  ],
+  "multiNoteModel": {
+    "modelId": "nayansaathi-ssdmobilenet-inr-int8",
+    "name": "NayanSaathi Indian Currency Object Detector",
+    "architecture": "SSD-MobileNetV2",
+    "task": "multiple-note-detection",
+    "inputSize": [300, 300, 3],
+    "iouThreshold": 0.35,
+    "confidenceThreshold": 0.85
+  }
+}

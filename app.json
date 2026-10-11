@@ -1,0 +1,52 @@
+{
+  "expo": {
+    "name": "NayanSaathi",
+    "slug": "nayansaathi",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#12161A"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "org.nayansaathi.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "NayanSaathi requires rear camera access to scan and identify Indian currency notes offline.",
+        "NSMicrophoneUsageDescription": "NayanSaathi uses microphone access for on-device voice commands to control scanning, check wallet totals, and split cash.",
+        "NSSpeechRecognitionUsageDescription": "NayanSaathi uses on-device speech recognition to process accessibility voice commands completely offline.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#12161A"
+      },
+      "package": "org.nayansaathi.app",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.VIBRATE",
+        "android.permission.FLASHLIGHT"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow NayanSaathi to access the camera to identify currency notes offline."
+        }
+      ]
+    ],
+    "scheme": "nayansaathi"
+  }
+}

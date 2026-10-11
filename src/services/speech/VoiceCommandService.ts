@@ -11,6 +11,16 @@ interface IntentRule {
 
 const INTENT_RULES: IntentRule[] = [
   {
+    intent: 'ADD_NOTE',
+    hasNumericArg: true,
+    regexPatterns: [
+      /\b(add|insert|plus|include|note)\s*(₹|rs|rupees?)?\s*(\d{2,4}|ten|twenty|fifty|hundred|two\s+hundred|five\s+hundred|two\s+thousand)/i,
+      /(\d{2,4}|ten|twenty|fifty|hundred|two\s+hundred|five\s+hundred|two\s+thousand)\s*(₹|rs|rupees?)?\s*(add|जोड़ो|जोड़ें)/i,
+      /(\d{2,4})\s*(रुपये|रुपए)?\s*(जोड़ो|जोड़ें|ऐड|डालो)/i,
+      /\b(add\s+note|add\s+cash)\b/i,
+    ],
+  },
+  {
     intent: 'START_SCANNING',
     regexPatterns: [
       /\b(start(\s+(scanning|counting))?|scan(\s+notes?)?|camera|open\s+scanner|check\s+note)\b/i,
@@ -117,26 +127,32 @@ const INTENT_RULES: IntentRule[] = [
       /\b(what\s+can\s+i\s+say|help(\s+me)?|command\s+list|instructions|what\s+to\s+say)\b/i,
       /(मैं\s*क्या\s*बोल\s*सकता\s*हूँ|सहायता|मदद)/i,
       /(உதவி|என்ன\s*சொல்லலாம்)/i,
-      /(மீ\s*काय\s*बोलू\s*शकतो|मदत)/i,
+      /(मी\s*काय\s*बोलू\s*शकतो|मदत)/i,
       /(আমি\s*কি\s*বলতে\s*পারি|সাহায্য)/i,
     ],
   },
 ];
 
-const WORD_NUMBERS: Record<string, number> = {
-  two: 2,
-  three: 3,
-  four: 4,
-  five: 5,
-  six: 6,
-  seven: 7,
-  eight: 8,
-  nine: 9,
-  ten: 10,
-  eleven: 11,
-  twelve: 12,
-  twenty: 20,
-};
+const WORD_NUMBERS: Array<[string, number]> = [
+  ['two thousand', 2000],
+  ['five hundred', 500],
+  ['two hundred', 200],
+  ['one hundred', 100],
+  ['hundred', 100],
+  ['fifty', 50],
+  ['twenty', 20],
+  ['twelve', 12],
+  ['eleven', 11],
+  ['ten', 10],
+  ['nine', 9],
+  ['eight', 8],
+  ['seven', 7],
+  ['six', 6],
+  ['five', 5],
+  ['four', 4],
+  ['three', 3],
+  ['two', 2],
+];
 
 export class VoiceCommandService {
   private isListeningActive = false;
@@ -205,6 +221,19 @@ export class VoiceCommandService {
       }
     }
 
+    // Direct denomination number mention (e.g. user just says "500" or "100")
+    const standaloneDenom = this.extractNumber(normalized);
+    if (standaloneDenom && [10, 20, 50, 100, 200, 500, 2000].includes(standaloneDenom)) {
+      return {
+        intent: 'ADD_NOTE',
+        rawText,
+        normalizedText: normalized,
+        numericArg: standaloneDenom,
+        confidence: 0.90,
+        timestamp: startTimestamp,
+      };
+    }
+
     return {
       intent: 'UNKNOWN',
       rawText,
@@ -223,15 +252,23 @@ export class VoiceCommandService {
   }
 
   private extractNumber(text: string): number | undefined {
-    const digitMatch = text.match(/\b([2-9]|1[0-9]|20)\b/);
-    if (digitMatch) {
-      return parseInt(digitMatch[1], 10);
+    // Check known denominations first (2000, 500, 200, 100, 50, 20, 10)
+    const denomMatch = text.match(/\b(2000|500|200|100|50|20|10)\b/);
+    if (denomMatch) {
+      return parseInt(denomMatch[1], 10);
     }
 
-    for (const [word, val] of Object.entries(WORD_NUMBERS)) {
+    // Check english word match in priority order
+    for (const [word, val] of WORD_NUMBERS) {
       if (text.includes(word)) {
         return val;
       }
+    }
+
+    // Check digit match (2 to 20 for split cash)
+    const digitMatch = text.match(/\b([2-9]|1[0-9]|20)\b/);
+    if (digitMatch) {
+      return parseInt(digitMatch[1], 10);
     }
 
     return undefined;
@@ -243,7 +280,8 @@ export class VoiceCommandService {
    */
   public startListening(
     onCommand: (cmd: VoiceCommand) => void,
-    onError?: (errorText: string) => void
+    onError?: (errorText: string) => void,
+    onInterim?: (interimText: string) => void
   ): boolean {
     this.isListeningActive = true;
 
@@ -269,19 +307,42 @@ export class VoiceCommandService {
           };
           recognition.lang = locales[this.currentLanguage] || 'en-IN';
           recognition.continuous = false;
-          recognition.interimResults = false;
+          recognition.interimResults = true;
+
+          let finalTranscript = '';
 
           recognition.onresult = (event: any) => {
-            const transcript = event.results?.[0]?.[0]?.transcript || '';
-            this.isListeningActive = false;
-            const cmd = this.parseCommand(transcript);
-            onCommand(cmd);
+            let interim = '';
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+              if (event.results[i].isFinal) {
+                finalTranscript += event.results[i][0].transcript;
+              } else {
+                interim += event.results[i][0].transcript;
+              }
+            }
+
+            if (onInterim && (interim || finalTranscript)) {
+              onInterim(interim || finalTranscript);
+            }
+
+            if (finalTranscript.trim()) {
+              this.isListeningActive = false;
+              const cmd = this.parseCommand(finalTranscript);
+              onCommand(cmd);
+            }
           };
 
           recognition.onerror = (err: any) => {
             this.isListeningActive = false;
+            console.warn('[VoiceCommand] Speech recognition error event:', err.error);
             if (onError) {
-              onError(err.error || 'Speech recognition error');
+              const msg =
+                err.error === 'not-allowed'
+                  ? 'Microphone permission denied. Allow microphone access in your browser address bar.'
+                  : err.error === 'no-speech'
+                  ? 'No speech detected. Please speak closer to your microphone.'
+                  : err.error;
+              onError(msg);
             }
           };
 

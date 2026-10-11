@@ -31,6 +31,24 @@ describe('VoiceCommandService - Deterministic Intent Parser', () => {
       expect(parser.parseCommand('remove last').intent).toBe('UNDO_LAST');
     });
 
+    it('parses ADD_NOTE intents and extracts denomination', () => {
+      const cmd1 = parser.parseCommand('add 500');
+      expect(cmd1.intent).toBe('ADD_NOTE');
+      expect(cmd1.numericArg).toBe(500);
+
+      const cmd2 = parser.parseCommand('add 100 rupees');
+      expect(cmd2.intent).toBe('ADD_NOTE');
+      expect(cmd2.numericArg).toBe(100);
+
+      const cmd3 = parser.parseCommand('add two hundred');
+      expect(cmd3.intent).toBe('ADD_NOTE');
+      expect(cmd3.numericArg).toBe(200);
+
+      const cmd4 = parser.parseCommand('500 जोड़ो');
+      expect(cmd4.intent).toBe('ADD_NOTE');
+      expect(cmd4.numericArg).toBe(500);
+    });
+
     it('parses CLEAR_WALLET and confirmation intents', () => {
       expect(parser.parseCommand('clear wallet').intent).toBe('CLEAR_WALLET');
       expect(parser.parseCommand('confirm').intent).toBe('CONFIRM_CLEAR');

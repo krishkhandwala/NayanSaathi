@@ -1,12 +1,15 @@
 /**
  * RealCameraRecognitionService
  *
- * Real-time Indian currency recognition engine processing actual pixel buffers
- * captured from webcams (browser HTML5 Canvas) and mobile cameras (CameraView takePictureAsync).
+ * Highly robust, multi-rule Indian currency recognition engine processing actual pixel buffers
+ * captured from webcams (HTML5 Canvas) and mobile cameras (CameraView takePictureAsync).
  *
- * Implements dual-metric recognition:
- *   1. Hue-Saturation-Lightness (HSL) histogram clustering with tolerant boundary rules
- *   2. Calibrated RBI reference color vector distance matching
+ * Features:
+ *   - 5-Rule Multi-Metric Scoring Matrix for all 7 RBI denominations
+ *   - RGB channel dominance ratios (eliminates hue-only ambiguities)
+ *   - Contrast & background noise filtration
+ *   - Saturation-lightness boundary enforcement (disambiguates ₹10 vs ₹200, ₹500 vs ₹20, ₹50 vs ₹100)
+ *   - Margin-of-victory confidence scoring
  */
 
 import { DenominationValue, SingleNoteResult, MultiNoteResult } from '../../types/currency';
@@ -15,119 +18,144 @@ import { multipleNoteDetector } from './MultipleNoteDetector';
 import { toByteArray } from 'base64-js';
 import jpeg from 'jpeg-js';
 
-export interface DenomProfile {
+export interface DenomRuleSpec {
   denom: DenominationValue;
   name: string;
+  // Rule 1: Hue boundary
   minH: number;
   maxH: number;
+  // Rule 2: Saturation envelope
   minS: number;
-  maxS?: number;
+  maxS: number;
+  // Rule 3: Lightness envelope
   minL: number;
   maxL: number;
-  // Normalized reference RGB vector for distance matching
+  // Rule 4: Reference RGB centroid
   refR: number;
   refG: number;
   refB: number;
+  // Rule 5: Channel balance validator
+  validateChannels: (r: number, g: number, b: number) => boolean;
 }
 
-export const DENOM_PROFILES: DenomProfile[] = [
-  // ₹10: Chocolate Brown
+export const DENOM_SPECS: DenomRuleSpec[] = [
+  // ₹10: Chocolate Brown (terracotta/warm brown)
+  // Channels: R >> G > B, Red significantly dominates Blue, lower lightness than ₹200
   {
     denom: 10,
     name: '₹10 (Chocolate Brown)',
     minH: 10,
-    maxH: 45,
-    minS: 0.12,
-    maxS: 0.90,
-    minL: 0.12,
-    maxL: 0.65,
-    refR: 165,
-    refG: 110,
-    refB: 65,
-  },
-  // ₹20: Greenish Yellow
-  {
-    denom: 20,
-    name: '₹20 (Greenish Yellow)',
-    minH: 45,
-    maxH: 85,
+    maxH: 36,
     minS: 0.14,
-    maxS: 0.90,
-    minL: 0.18,
-    maxL: 0.75,
-    refR: 175,
-    refG: 185,
-    refB: 75,
+    maxS: 0.75,
+    minL: 0.12,
+    maxL: 0.52,
+    refR: 160,
+    refG: 105,
+    refB: 60,
+    validateChannels: (r, g, b) => r > g && r > b * 1.4 && (r - b) > 35,
   },
-  // ₹50: Fluorescent Blue / Cyan
-  {
-    denom: 50,
-    name: '₹50 (Fluorescent Blue)',
-    minH: 165,
-    maxH: 225,
-    minS: 0.12,
-    maxS: 0.95,
-    minL: 0.18,
-    maxL: 0.80,
-    refR: 70,
-    refG: 180,
-    refB: 215,
-  },
-  // ₹100: Lavender / Violet-Purple
-  {
-    denom: 100,
-    name: '₹100 (Lavender)',
-    minH: 215,
-    maxH: 285,
-    minS: 0.12,
-    maxS: 0.88,
-    minL: 0.18,
-    maxL: 0.82,
-    refR: 165,
-    refG: 155,
-    refB: 215,
-  },
+
   // ₹200: Bright Orange-Yellow
+  // Channels: High R, High G, Low B, High Saturation, High Lightness
   {
     denom: 200,
     name: '₹200 (Bright Yellow)',
-    minH: 32,
+    minH: 34,
     maxH: 52,
-    minS: 0.26,
+    minS: 0.35,
     maxS: 1.0,
-    minL: 0.28,
-    maxL: 0.85,
+    minL: 0.35,
+    maxL: 0.88,
     refR: 245,
-    refG: 180,
+    refG: 185,
     refB: 35,
+    validateChannels: (r, g, b) => r > 140 && g > 110 && r > b * 1.6 && r >= g,
   },
-  // ₹500: Stone Grey (Sage green / grey, low saturation)
+
+  // ₹20: Greenish-Yellow
+  // Channels: Green is prominent, G >= R * 0.85, G > B * 1.35
+  {
+    denom: 20,
+    name: '₹20 (Greenish Yellow)',
+    minH: 54,
+    maxH: 85,
+    minS: 0.18,
+    maxS: 0.90,
+    minL: 0.20,
+    maxL: 0.78,
+    refR: 175,
+    refG: 188,
+    refB: 70,
+    validateChannels: (r, g, b) => g >= r * 0.80 && g > b * 1.3 && g > 90,
+  },
+
+  // ₹500: Stone Grey (sage green tint, very low saturation)
+  // Channels: R, G, B are tightly balanced (neutral grey), saturation is lowest of all notes
   {
     denom: 500,
     name: '₹500 (Stone Grey)',
-    minH: 60,
-    maxH: 155,
-    minS: 0.03,
-    maxS: 0.28,
-    minL: 0.22,
+    minH: 55,
+    maxH: 160,
+    minS: 0.02,
+    maxS: 0.22, // Critical: stone grey must have low saturation
+    minL: 0.25,
     maxL: 0.78,
     refR: 135,
     refG: 145,
-    refB: 130,
+    refB: 132,
+    validateChannels: (r, g, b) => Math.abs(r - g) < 40 && Math.abs(g - b) < 40 && Math.abs(r - b) < 45,
   },
-  // ₹2000: Magenta / Deep Rose
+
+  // ₹50: Fluorescent Blue / Cyan
+  // Channels: Blue and Green dominate Red (B > R * 1.25, G > R)
+  {
+    denom: 50,
+    name: '₹50 (Fluorescent Blue)',
+    minH: 170,
+    maxH: 220,
+    minS: 0.15,
+    maxS: 0.95,
+    minL: 0.20,
+    maxL: 0.82,
+    refR: 65,
+    refG: 180,
+    refB: 215,
+    validateChannels: (r, g, b) => b > r * 1.2 && g > r * 1.05 && b > 100,
+  },
+
+  // ₹100: Lavender / Violet-Purple
+  // Channels: Blue highest, Red moderate, Green lowest (B > G * 1.15, R > G * 0.85)
+  {
+    denom: 100,
+    name: '₹100 (Lavender)',
+    minH: 222,
+    maxH: 285,
+    minS: 0.12,
+    maxS: 0.88,
+    minL: 0.20,
+    maxL: 0.85,
+    refR: 165,
+    refG: 150,
+    refB: 220,
+    validateChannels: (r, g, b) => b > g * 1.1 && b >= r * 0.9 && b > 90,
+  },
+
+  // ₹2000: Magenta / Deep Rose Pink
+  // Channels: Red and Blue both high, Green suppressed
   {
     denom: 2000,
     name: '₹2000 (Magenta)',
-    minH: 295,
+    minH: 300,
     maxH: 355,
-    minS: 0.14,
+    minS: 0.16,
     maxS: 0.95,
-    minL: 0.18,
-    maxL: 0.82,
+    minL: 0.20,
+    maxL: 0.85,
     refR: 215,
     refG: 70,
-    refB: 150,
+    refB: 155,
+    validateChannels: (r, g, b) => r > g * 1.35 && b > g * 1.15 && r > 110,
   },
 ];
 
@@ -165,30 +193,33 @@ export interface PixelAnalysisResult {
   detectedDenom: DenominationValue | null;
   confidence: number;
   dominantColorName?: string;
+  marginScore?: number;
 }
 
 export function analyzePixelRegion(
   pixels: Uint8ClampedArray | Uint8Array,
   width: number,
   height: number,
-  startX = 0.12,
-  endX = 0.88,
-  startY = 0.12,
-  endY = 0.88
+  startX = 0.10,
+  endX = 0.90,
+  startY = 0.10,
+  endY = 0.90
 ): PixelAnalysisResult {
   const x0 = Math.floor(width * startX);
   const x1 = Math.floor(width * endX);
   const y0 = Math.floor(height * startY);
   const y1 = Math.floor(height * endY);
 
-  const step = Math.max(2, Math.floor(Math.sqrt((width * height) / 4500)));
+  const step = Math.max(2, Math.floor(Math.sqrt((width * height) / 5000)));
 
   let totalLuma = 0;
-  let totalR = 0;
-  let totalG = 0;
-  let totalB = 0;
   let sampleCount = 0;
-  const denomVotes = new Map<DenominationValue, number>();
+
+  // Aggregate multi-rule score for each denomination
+  const scores = new Map<DenominationValue, number>();
+  for (const spec of DENOM_SPECS) {
+    scores.set(spec.denom, 0);
+  }
 
   for (let y = y0; y < y1; y += step) {
     for (let x = x0; x < x1; x += step) {
@@ -199,29 +230,47 @@ export function analyzePixelRegion(
 
       const luma = 0.299 * r + 0.587 * g + 0.114 * b;
       totalLuma += luma;
-      totalR += r;
-      totalG += g;
-      totalB += b;
       sampleCount++;
+
+      // Skip extreme dark shadows or blown highlights in individual pixels
+      if (luma < 20 || luma > 250) continue;
 
       const [h, s, l] = rgbToHsl(r, g, b);
 
-      for (const rule of DENOM_PROFILES) {
-        if (
-          s >= rule.minS &&
-          (rule.maxS === undefined || s <= rule.maxS) &&
-          l >= rule.minL &&
-          l <= rule.maxL
-        ) {
-          const hueMatch =
-            rule.minH <= rule.maxH
-              ? h >= rule.minH && h <= rule.maxH
-              : h >= rule.minH || h <= rule.maxH;
+      // Evaluate pixel against each candidate denomination
+      for (const spec of DENOM_SPECS) {
+        let pixelScore = 0;
 
-          if (hueMatch) {
-            denomVotes.set(rule.denom, (denomVotes.get(rule.denom) ?? 0) + 1);
-            break;
-          }
+        // 1. Hue window check
+        const inHue =
+          spec.minH <= spec.maxH
+            ? h >= spec.minH && h <= spec.maxH
+            : h >= spec.minH || h <= spec.maxH;
+
+        if (inHue) pixelScore += 2.0;
+
+        // 2. Saturation & Lightness envelope
+        if (s >= spec.minS && s <= spec.maxS && l >= spec.minL && l <= spec.maxL) {
+          pixelScore += 2.0;
+        }
+
+        // 3. Channel balance validator
+        if (spec.validateChannels(r, g, b)) {
+          pixelScore += 2.5;
+        }
+
+        // 4. Centroid Euclidean closeness
+        const dr = (r - spec.refR) / 255;
+        const dg = (g - spec.refG) / 255;
+        const db = (b - spec.refB) / 255;
+        const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+        if (dist < 0.35) {
+          pixelScore += (0.35 - dist) * 4;
+        }
+
+        // Only add to score if at least 2 key criteria matched
+        if (pixelScore >= 4.0) {
+          scores.set(spec.denom, (scores.get(spec.denom) ?? 0) + pixelScore);
         }
       }
     }
@@ -232,79 +281,62 @@ export function analyzePixelRegion(
   }
 
   const avgLuma = totalLuma / sampleCount;
-  if (avgLuma < 25) {
+  if (avgLuma < 22) {
     return { luma: avgLuma, isTooDark: true, isTooBright: false, detectedDenom: null, confidence: 0 };
   }
   if (avgLuma > 248) {
     return { luma: avgLuma, isTooDark: false, isTooBright: true, detectedDenom: null, confidence: 0 };
   }
 
-  // 1. Find top vote from HSL clustering
+  // Find top two scoring denominations to compute margin of victory
   let topDenom: DenominationValue | null = null;
-  let maxVotes = 0;
-  let topRuleName: string | undefined;
+  let topScore = 0;
+  let secondScore = 0;
 
-  denomVotes.forEach((votes, denom) => {
-    if (votes > maxVotes) {
-      maxVotes = votes;
+  scores.forEach((score, denom) => {
+    if (score > topScore) {
+      secondScore = topScore;
+      topScore = score;
       topDenom = denom;
-      topRuleName = DENOM_PROFILES.find((r) => r.denom === denom)?.name;
+    } else if (score > secondScore) {
+      secondScore = score;
     }
   });
 
-  const voteRatio = maxVotes / sampleCount;
+  // Calculate ratio of points scored relative to theoretical max
+  const maxPossibleScore = sampleCount * 8.0;
+  const scoreRatio = topScore / maxPossibleScore;
 
-  // 2. Vector distance cross-check
-  const meanR = totalR / sampleCount;
-  const meanG = totalG / sampleCount;
-  const meanB = totalB / sampleCount;
+  // Margin of victory over runner-up
+  const margin = topScore > 0 ? (topScore - secondScore) / topScore : 0;
 
-  let bestVectorDenom: DenominationValue | null = null;
-  let bestVectorScore = 0;
-
-  for (const prof of DENOM_PROFILES) {
-    const dr = meanR - prof.refR;
-    const dg = meanG - prof.refG;
-    const db = meanB - prof.refB;
-    const dist = Math.sqrt(dr * dr + dg * dg + db * db);
-    // Max RGB distance ~ 441. Normalizing to similarity (0 to 1)
-    const similarity = Math.max(0, 1 - dist / 220);
-    if (similarity > bestVectorScore) {
-      bestVectorScore = similarity;
-      bestVectorDenom = prof.denom;
-    }
-  }
-
-  // Combined decision: either dominant cluster >= 12% or high vector similarity >= 0.72
-  let finalDenom: DenominationValue | null = null;
-  let finalConfidence = 0;
-
-  if (topDenom && voteRatio >= 0.12) {
-    finalDenom = topDenom;
-    finalConfidence = Math.min(0.98, Math.max(0.72, 0.65 + voteRatio * 0.75));
-  } else if (bestVectorDenom && bestVectorScore >= 0.70) {
-    finalDenom = bestVectorDenom;
-    finalConfidence = Math.min(0.92, bestVectorScore);
-    topRuleName = DENOM_PROFILES.find((r) => r.denom === bestVectorDenom)?.name;
-  }
-
-  if (!finalDenom) {
+  // Threshold: must achieve at least 5% of max possible score
+  if (!topDenom || topScore === 0 || scoreRatio < 0.05) {
     return {
       luma: avgLuma,
       isTooDark: false,
       isTooBright: false,
       detectedDenom: null,
-      confidence: Math.min(0.4, voteRatio * 2),
+      confidence: 0,
+      marginScore: 0,
     };
   }
+
+  // Calculate high confidence scaled by match density and margin
+  const baseConfidence = 0.72 + Math.min(0.20, scoreRatio * 1.2);
+  const marginBonus = Math.min(0.06, margin * 0.08);
+  const confidence = Math.min(0.98, Math.max(0.70, baseConfidence + marginBonus));
+
+  const spec = DENOM_SPECS.find((s) => s.denom === topDenom);
 
   return {
     luma: avgLuma,
     isTooDark: false,
     isTooBright: false,
-    detectedDenom: finalDenom,
-    confidence: finalConfidence,
-    dominantColorName: topRuleName,
+    detectedDenom: topDenom,
+    confidence,
+    dominantColorName: spec?.name,
+    marginScore: margin,
   };
 }
 
@@ -327,7 +359,7 @@ export class RealCameraRecognitionEngine {
         confidence: 0,
         status: 'TOO_DARK',
         timestamp: startTime,
-        modelVersion: 'real-camera-color-v2',
+        modelVersion: 'multi-rule-color-v3',
         inferenceTimeMs: Date.now() - startTime,
       };
     }
@@ -338,7 +370,7 @@ export class RealCameraRecognitionEngine {
         confidence: 0,
         status: 'UNCERTAIN',
         timestamp: startTime,
-        modelVersion: 'real-camera-color-v2',
+        modelVersion: 'multi-rule-color-v3',
         inferenceTimeMs: Date.now() - startTime,
       };
     }
@@ -360,10 +392,8 @@ export class RealCameraRecognitionEngine {
     width: number,
     height: number
   ): MultiNoteResult {
-    // Check left region
-    const leftAnalysis = analyzePixelRegion(pixels, width, height, 0.05, 0.48, 0.15, 0.85);
-    // Check right region
-    const rightAnalysis = analyzePixelRegion(pixels, width, height, 0.52, 0.95, 0.15, 0.85);
+    const leftAnalysis = analyzePixelRegion(pixels, width, height, 0.05, 0.48, 0.12, 0.88);
+    const rightAnalysis = analyzePixelRegion(pixels, width, height, 0.52, 0.95, 0.12, 0.88);
 
     const detections: Array<{
       denomination: DenominationValue;
@@ -387,7 +417,6 @@ export class RealCameraRecognitionEngine {
       });
     }
 
-    // If both regions empty, try full center
     if (detections.length === 0) {
       const center = analyzePixelRegion(pixels, width, height);
       if (center.detectedDenom && center.confidence >= 0.65) {

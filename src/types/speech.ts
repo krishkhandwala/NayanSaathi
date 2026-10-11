@@ -2,6 +2,7 @@ export type VoiceIntentType =
   | 'START_SCANNING'
   | 'STOP_SCANNING'
   | 'QUERY_TOTAL'
+  | 'ADD_NOTE'
   | 'CLEAR_WALLET'
   | 'CONFIRM_CLEAR'
   | 'CANCEL'

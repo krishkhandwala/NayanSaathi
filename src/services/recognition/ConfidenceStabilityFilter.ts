@@ -50,8 +50,8 @@ export class ConfidenceStabilityFilter {
       };
     }
 
-    // 2. High confidence or manual single capture confirm immediately
-    if (isManualCapture || confidence >= 0.78) {
+    // 2. Manual single capture confirms immediately
+    if (isManualCapture) {
       this.currentCandidate = rawDenomination;
       this.consecutiveCount = this.config.minConsecutiveFrames;
       this.lastConfirmedDenomination = rawDenomination;
@@ -62,7 +62,7 @@ export class ConfidenceStabilityFilter {
         confidence,
         status: 'CONFIRMED',
         timestamp: now,
-        modelVersion: 'real-camera-color-v2',
+        modelVersion: 'multi-rule-color-v3',
         inferenceTimeMs,
       };
     }

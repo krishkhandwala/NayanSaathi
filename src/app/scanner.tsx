@@ -1,12 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Platform } from 'react-native';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { View, Text, StyleSheet, Platform, ActivityIndicator } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useApp } from '../state/AppContext';
 import { AccessibleButton } from '../components/AccessibleButton';
 import { ScannerStatus } from '../components/ScannerStatus';
 import { CameraGuidanceOverlay } from '../components/CameraGuidanceOverlay';
 import { cameraGuidanceEngine } from '../services/camera/CameraGuidanceEngine';
-import { currencyRecognitionService } from '../services/recognition/CurrencyRecognitionService';
+import { realCameraRecognitionEngine } from '../services/recognition/RealCameraRecognitionService';
 import { imagePreprocessService } from '../services/recognition/ImagePreprocessService';
 import { motionSensorService } from '../services/sensors/MotionSensorService';
 import { hapticsService } from '../services/haptics/HapticsService';
@@ -14,84 +14,228 @@ import { t } from '../localization/i18n';
 import { DenominationValue, SingleNoteResult, MultiNoteResult } from '../types/currency';
 import { ACCESSIBILITY_METRICS } from '../constants/theme';
 
+type CapturedFrame = {
+  pixels: Uint8ClampedArray | Uint8Array;
+  width: number;
+  height: number;
+};
+
 export default function ScannerScreen() {
   const { theme, addConfirmedNote, addConfirmedNotes, announce } = useApp();
   const [permission, requestPermission] = useCameraPermissions();
   const [isPaused, setIsPaused] = useState(false);
   const [torchActive, setTorchActive] = useState(false);
   const [isMultiMode, setIsMultiMode] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [webCameraReady, setWebCameraReady] = useState(false);
+  const [webCameraError, setWebCameraError] = useState<string | null>(null);
   const [latestSingleResult, setLatestSingleResult] = useState<SingleNoteResult | null>(null);
   const [latestMultiResult, setLatestMultiResult] = useState<MultiNoteResult | null>(null);
   const [guidanceState, setGuidanceState] = useState(cameraGuidanceEngine.getState());
 
-  const frameIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const cameraRef = useRef<CameraView | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const scanIntervalRef = useRef<any>(null);
+  const isBusyRef = useRef(false);
 
+  // Web Webcam Stream Lifecycle
   useEffect(() => {
-    // Start sensor listening for motion jitter detection
-    motionSensorService.startListening();
+    if (Platform.OS !== 'web') return;
 
-    announce(t('scanner_status_ready'), 'HIGH');
+    let localStream: MediaStream | null = null;
+    let isSubscribed = true;
 
-    // Simulated frame acquisition loop (throttled to 5 FPS to preserve battery and backpressure)
-    frameIntervalRef.current = setInterval(async () => {
-      if (isPaused) return;
+    async function startWebcam() {
+      try {
+        setWebCameraError(null);
+        // Try environment camera first (for mobile browsers), fallback to laptop webcam
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+            },
+            audio: false,
+          });
+        } catch {
+          localStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        }
 
-      // 1. Analyze simulated frame metadata
-      const mockLuma = new Uint8Array([110, 115, 120, 130, 140, 150, 160, 170]);
-      const prep = imagePreprocessService.analyzeFrameData(mockLuma, 224, 224);
+        if (isSubscribed && videoRef.current && localStream) {
+          videoRef.current.srcObject = localStream;
+          await videoRef.current.play().catch(() => {});
+          setWebCameraReady(true);
+          announce(t('scanner_status_ready'), 'NORMAL');
+        }
+      } catch (err: any) {
+        console.warn('[Webcam] Access error:', err);
+        if (isSubscribed) {
+          setWebCameraError('Camera access failed. Please ensure camera permissions are allowed in your browser.');
+          announce('Camera access was not granted.', 'HIGH');
+        }
+      }
+    }
 
-      // 2. Camera guidance
+    startWebcam();
+
+    return () => {
+      isSubscribed = false;
+      if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop());
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+    };
+  }, [announce]);
+
+  // Capture pixels from Web Canvas
+  const captureWebFrame = useCallback((): CapturedFrame | null => {
+    if (!videoRef.current || !canvasRef.current) return null;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+
+    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+
+    const width = 320;
+    const height = 240;
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+
+    ctx.drawImage(video, 0, 0, width, height);
+    const imgData = ctx.getImageData(0, 0, width, height);
+    return { pixels: imgData.data, width, height };
+  }, []);
+
+  // Capture and decode pixels from Mobile CameraView
+  const captureMobileFrame = useCallback(async (): Promise<CapturedFrame | null> => {
+    if (!cameraRef.current) return null;
+    try {
+      const photo = await cameraRef.current.takePictureAsync({
+        base64: true,
+        quality: 0.25,
+        skipProcessing: true,
+      });
+
+      if (!photo?.base64) return null;
+      return realCameraRecognitionEngine.decodeMobileBase64(photo.base64);
+    } catch (err) {
+      console.warn('[Mobile] takePictureAsync failed:', err);
+      return null;
+    }
+  }, []);
+
+  // Core Frame Processor
+  const processCurrentFrame = useCallback(async () => {
+    if (isPaused || isBusyRef.current) return;
+    isBusyRef.current = true;
+    setIsProcessing(true);
+
+    try {
+      let frameData: CapturedFrame | null = null;
+
+      if (Platform.OS === 'web') {
+        frameData = captureWebFrame();
+      } else {
+        frameData = await captureMobileFrame();
+      }
+
+      if (!frameData) {
+        isBusyRef.current = false;
+        setIsProcessing(false);
+        return;
+      }
+
+      const { pixels, width, height } = frameData;
+
+      // Extract luma sample for motion & guidance
+      const sampleLuma = new Uint8Array(width * height);
+      for (let i = 0; i < sampleLuma.length; i++) {
+        const idx = i * 4;
+        sampleLuma[i] = Math.round(
+          0.299 * pixels[idx] + 0.587 * pixels[idx + 1] + 0.114 * pixels[idx + 2]
+        );
+      }
+
+      const prep = imagePreprocessService.analyzeFrameData(sampleLuma, width, height);
       const guidance = cameraGuidanceEngine.evaluateFrame(prep, {
-        x: 60,
-        y: 100,
-        width: 280,
-        height: 140,
+        x: Math.floor(width * 0.15),
+        y: Math.floor(height * 0.15),
+        width: Math.floor(width * 0.7),
+        height: Math.floor(height * 0.7),
       });
       setGuidanceState(guidance);
 
-      // 3. If frame is valid and steady, run inference
-      if (prep.isValidForInference && guidance.motion === 'STEADY') {
-        if (!isMultiMode) {
-          const res = await currencyRecognitionService.classifySingleNote(mockLuma);
-          setLatestSingleResult(res);
+      if (!isMultiMode) {
+        // Single note classification
+        const res = realCameraRecognitionEngine.classifyPixels(pixels, width, height);
+        setLatestSingleResult(res);
 
-          if (res.status === 'CONFIRMED' && res.denomination) {
-            hapticsService.trigger('SUCCESS');
-            announce(
-              t('note_identified', { denomination: res.denomination }),
-              'HIGH'
-            );
-          } else if (res.status === 'LOW_CONFIDENCE' || res.status === 'UNCERTAIN') {
+        if (res.status === 'CONFIRMED' && res.denomination) {
+          hapticsService.trigger('SUCCESS');
+          announce(t('note_identified', { denomination: res.denomination }), 'HIGH');
+        } else if (res.status === 'LOW_CONFIDENCE' || res.status === 'UNCERTAIN') {
+          if (res.denomination) {
             hapticsService.trigger('UNCERTAIN');
-          }
-        } else {
-          const mRes = await currencyRecognitionService.detectMultipleNotes(mockLuma);
-          setLatestMultiResult(mRes);
-
-          if (mRes.hasOverlappingNotes) {
-            hapticsService.trigger('UNCERTAIN');
-            announce(t('guidance_separate_notes'), 'GUIDANCE');
-          } else if (mRes.confirmedCount > 0) {
-            hapticsService.trigger('SUCCESS');
-            announce(
-              t('notes_multi_identified', {
-                count: mRes.confirmedCount,
-                total: mRes.totalValue,
-              }),
-              'HIGH'
-            );
           }
         }
+      } else {
+        // Multi-note detection
+        const mRes = realCameraRecognitionEngine.detectMultipleNotesFromPixels(
+          pixels,
+          width,
+          height
+        );
+        setLatestMultiResult(mRes);
+
+        if (mRes.hasOverlappingNotes) {
+          hapticsService.trigger('UNCERTAIN');
+          announce(t('guidance_separate_notes'), 'GUIDANCE');
+        } else if (mRes.confirmedCount > 0) {
+          hapticsService.trigger('SUCCESS');
+          announce(
+            t('notes_multi_identified', {
+              count: mRes.confirmedCount,
+              total: mRes.totalValue,
+            }),
+            'HIGH'
+          );
+        }
       }
-    }, 600); // 600ms interval = ~1.6 FPS inference rate to protect battery
+    } catch (err) {
+      console.warn('[Scanner] Frame processing error:', err);
+    } finally {
+      isBusyRef.current = false;
+      setIsProcessing(false);
+    }
+  }, [isPaused, isMultiMode, captureWebFrame, captureMobileFrame, announce]);
+
+  // Periodic automatic scanner loop
+  useEffect(() => {
+    motionSensorService.startListening();
+    announce(t('scanner_status_ready'), 'HIGH');
+
+    // On web run every 600ms; on mobile every 1200ms to balance accuracy and battery
+    const intervalMs = Platform.OS === 'web' ? 600 : 1200;
+    scanIntervalRef.current = setInterval(() => {
+      processCurrentFrame();
+    }, intervalMs);
 
     return () => {
-      if (frameIntervalRef.current) {
-        clearInterval(frameIntervalRef.current);
+      if (scanIntervalRef.current) {
+        clearInterval(scanIntervalRef.current);
       }
       motionSensorService.stopListening();
     };
-  }, [isPaused, isMultiMode]);
+  }, [processCurrentFrame, announce]);
 
   const togglePause = () => {
     const nextPaused = !isPaused;
@@ -124,6 +268,7 @@ export default function ScannerScreen() {
     if (!isMultiMode) {
       if (latestSingleResult?.denomination && latestSingleResult.status === 'CONFIRMED') {
         addConfirmedNote(latestSingleResult.denomination);
+        announce(`₹${latestSingleResult.denomination} added to wallet`, 'HIGH');
         setLatestSingleResult(null);
       }
     } else {
@@ -132,57 +277,123 @@ export default function ScannerScreen() {
           .filter((n) => n.status === 'CONFIRMED')
           .map((n) => ({ denomination: n.denomination }));
         addConfirmedNotes(notesToAdd);
+        announce(`₹${latestMultiResult.totalValue} added to wallet`, 'HIGH');
         setLatestMultiResult(null);
       }
     }
   };
 
-  if (!permission) {
-    return (
-      <View style={[styles.centered, { backgroundColor: theme.background }]}>
-        <Text style={[styles.text, { color: theme.text }]}>Checking camera permissions...</Text>
-      </View>
-    );
-  }
+  // Demo fallback test helper for quick verification
+  const handleTestSimulate = (denom: DenominationValue) => {
+    setLatestSingleResult({
+      denomination: denom,
+      confidence: 0.95,
+      status: 'CONFIRMED',
+      timestamp: Date.now(),
+      modelVersion: 'simulated-test',
+      inferenceTimeMs: 15,
+    });
+    hapticsService.trigger('SUCCESS');
+    announce(`₹${denom} note identified`, 'HIGH');
+  };
 
-  if (!permission.granted) {
-    return (
-      <View style={[styles.centered, { backgroundColor: theme.background }]}>
-        <Text style={[styles.text, { color: theme.text }]}>
-          Camera permission is required to scan Indian currency notes.
-        </Text>
-        <AccessibleButton
-          label="Grant Camera Permission"
-          onPress={requestPermission}
-          variant="primary"
-          style={{ marginTop: 16 }}
-        />
-      </View>
-    );
+  if (Platform.OS !== 'web') {
+    if (!permission) {
+      return (
+        <View style={[styles.centered, { backgroundColor: theme.background }]}>
+          <Text style={[styles.text, { color: theme.text }]}>Checking camera permissions...</Text>
+        </View>
+      );
+    }
+
+    if (!permission.granted) {
+      return (
+        <View style={[styles.centered, { backgroundColor: theme.background }]}>
+          <Text style={[styles.text, { color: theme.text }]}>
+            Camera permission is required to scan Indian currency notes.
+          </Text>
+          <AccessibleButton
+            label="Grant Camera Permission"
+            onPress={requestPermission}
+            variant="primary"
+            style={{ marginTop: 16 }}
+          />
+        </View>
+      );
+    }
   }
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Live Camera Viewfinder */}
       <View style={styles.cameraContainer}>
-        {Platform.OS !== 'web' ? (
+        {Platform.OS === 'web' ? (
+          <View style={StyleSheet.absoluteFill}>
+            {/* Real HTML5 Video element for laptop/webcam */}
+            {React.createElement('video', {
+              ref: (el: HTMLVideoElement | null) => {
+                videoRef.current = el;
+              },
+              autoPlay: true,
+              playsInline: true,
+              muted: true,
+              style: {
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+                backgroundColor: '#0f172a',
+              },
+            })}
+            {React.createElement('canvas', {
+              ref: (el: HTMLCanvasElement | null) => {
+                canvasRef.current = el;
+              },
+              style: { display: 'none' },
+              width: 320,
+              height: 240,
+            })}
+            {webCameraError && (
+              <View style={styles.webErrorBanner}>
+                <Text style={styles.webErrorText}>{webCameraError}</Text>
+              </View>
+            )}
+          </View>
+        ) : (
           <CameraView
-            style={StyleSheet.absoluteFillObject}
+            ref={cameraRef}
+            style={StyleSheet.absoluteFill}
             facing="back"
             enableTorch={torchActive}
           />
-        ) : (
-          <View
-            style={[
-              StyleSheet.absoluteFillObject,
-              { backgroundColor: '#000000', alignItems: 'center', justifyContent: 'center' },
-            ]}
-          >
-            <Text style={{ color: '#FFFFFF', fontSize: 16 }}>Camera Preview (Web Fallback)</Text>
-          </View>
         )}
 
         <CameraGuidanceOverlay guidance={guidanceState} />
+
+        {/* Live Identification Badge */}
+        {latestSingleResult?.denomination && (
+          <View
+            style={[
+              styles.detectionBanner,
+              {
+                backgroundColor:
+                  latestSingleResult.status === 'CONFIRMED' ? '#166534' : '#854d0e',
+              },
+            ]}
+          >
+            <Text style={styles.detectionBannerText}>
+              {latestSingleResult.status === 'CONFIRMED'
+                ? `₹${latestSingleResult.denomination} Note Identified (${Math.round(latestSingleResult.confidence * 100)}%)`
+                : `Detecting ₹${latestSingleResult.denomination}... (${Math.round(latestSingleResult.confidence * 100)}%)`}
+            </Text>
+          </View>
+        )}
+
+        {isProcessing && (
+          <View style={styles.processingIndicator}>
+            <ActivityIndicator size="small" color="#38bdf8" />
+            <Text style={styles.processingText}>Analyzing frame...</Text>
+          </View>
+        )}
       </View>
 
       {/* Control Panel */}
@@ -193,22 +404,33 @@ export default function ScannerScreen() {
           torchActive={torchActive}
         />
 
+        {/* Direct Action Button: Trigger Manual Scan */}
+        <AccessibleButton
+          label="📸 Scan Note Now"
+          accessibilityHint="Captures the current camera frame and scans for currency notes"
+          onPress={processCurrentFrame}
+          variant="primary"
+          style={{ marginBottom: 8 }}
+        />
+
         {/* Confirmation Button for Identified Note */}
         {latestSingleResult?.status === 'CONFIRMED' && latestSingleResult.denomination && (
           <AccessibleButton
-            label={`Add ₹${latestSingleResult.denomination} to Wallet`}
+            label={`➕ Add ₹${latestSingleResult.denomination} to Wallet`}
             accessibilityHint="Adds confirmed note to your cash wallet total"
             onPress={handleAddConfirmedNote}
-            variant="primary"
+            variant="secondary"
+            style={{ marginBottom: 8, backgroundColor: '#059669' }}
           />
         )}
 
         {latestMultiResult && latestMultiResult.confirmedCount > 0 && isMultiMode && (
           <AccessibleButton
-            label={`Add ₹${latestMultiResult.totalValue} (${latestMultiResult.confirmedCount} notes) to Wallet`}
+            label={`➕ Add ₹${latestMultiResult.totalValue} (${latestMultiResult.confirmedCount} notes) to Wallet`}
             accessibilityHint="Adds all confirmed notes to your cash wallet"
             onPress={handleAddConfirmedNote}
-            variant="primary"
+            variant="secondary"
+            style={{ marginBottom: 8, backgroundColor: '#059669' }}
           />
         )}
 
@@ -222,19 +444,31 @@ export default function ScannerScreen() {
           />
 
           <AccessibleButton
-            label={torchActive ? 'Turn Off Torch' : 'Turn On Torch'}
+            label={torchActive ? 'Torch Off' : 'Torch On'}
             onPress={toggleTorch}
             variant="secondary"
             style={styles.halfBtn}
           />
         </View>
 
-        <AccessibleButton
-          label={isMultiMode ? t('scanner_single_mode') : t('scanner_multi_mode')}
-          accessibilityHint="Switches between scanning one note at a time and detecting multiple scattered notes"
-          onPress={toggleScanMode}
-          variant="outline"
-        />
+        <View style={[styles.actionRow, { marginTop: 8 }]}>
+          <AccessibleButton
+            label={isMultiMode ? t('scanner_single_mode') : t('scanner_multi_mode')}
+            accessibilityHint="Switches between scanning one note at a time and detecting multiple scattered notes"
+            onPress={toggleScanMode}
+            variant="outline"
+            style={styles.halfBtn}
+          />
+
+          {/* Quick Demo Button for desktop testing */}
+          <AccessibleButton
+            label="Test ₹100"
+            accessibilityHint="Simulates detecting a ₹100 note for verification"
+            onPress={() => handleTestSimulate(100)}
+            variant="outline"
+            style={styles.halfBtn}
+          />
+        </View>
       </View>
     </View>
   );
@@ -248,6 +482,7 @@ const styles = StyleSheet.create({
     flex: 1,
     overflow: 'hidden',
     position: 'relative',
+    backgroundColor: '#020617',
   },
   controlPanel: {
     padding: 16,
@@ -256,7 +491,7 @@ const styles = StyleSheet.create({
   },
   actionRow: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 10,
   },
   halfBtn: {
     flex: 1,
@@ -271,5 +506,62 @@ const styles = StyleSheet.create({
     fontSize: ACCESSIBILITY_METRICS.fontSize.base,
     textAlign: 'center',
     lineHeight: ACCESSIBILITY_METRICS.lineHeight.base,
+  },
+  detectionBanner: {
+    position: 'absolute',
+    top: 20,
+    left: 20,
+    right: 20,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 8,
+    borderWidth: 1.5,
+    borderColor: '#4ade80',
+  },
+  detectionBannerText: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  processingIndicator: {
+    position: 'absolute',
+    bottom: 16,
+    left: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.85)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 8,
+  },
+  processingText: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  webErrorBanner: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+  },
+  webErrorText: {
+    color: '#f87171',
+    fontSize: 16,
+    textAlign: 'center',
+    lineHeight: 24,
   },
 });

@@ -21,7 +21,7 @@ export class ImagePreprocessService {
    * On mobile native devices, this is bridged to OpenCV Mobile native C++ module or Android CameraX ImageAnalysis.
    */
   public analyzeFrameData(
-    lumaSamples: Uint8Array | number[],
+    lumaSamples: Uint8Array | Uint8ClampedArray | number[],
     width: number,
     height: number
   ): PreprocessAnalysis {

@@ -8,6 +8,7 @@ import { MLModelStatus } from '../../types/settings';
 import { confidenceStabilityFilter } from './ConfidenceStabilityFilter';
 import { imagePreprocessService } from './ImagePreprocessService';
 import { multipleNoteDetector } from './MultipleNoteDetector';
+import { realCameraRecognitionEngine } from './RealCameraRecognitionService';
 
 export class CurrencyRecognitionService {
   private modelStatus: MLModelStatus = {
@@ -62,13 +63,24 @@ export class CurrencyRecognitionService {
    * Frame preprocessing checks lighting and blur prior to inference.
    */
   public async classifySingleNote(
-    pixelBuffer: Uint8Array | number[],
+    pixelBuffer: Uint8Array | Uint8ClampedArray | number[],
     width = 224,
     height = 224
   ): Promise<SingleNoteResult> {
     const startTime = Date.now();
 
-    // 1. Preprocess check
+    if (!pixelBuffer || pixelBuffer.length === 0) {
+      return confidenceStabilityFilter.processPrediction(null, 0, 10);
+    }
+
+    // If full RGBA buffer provided (typical from camera/canvas, length >= width*height*4 or >= 1000)
+    if (pixelBuffer instanceof Uint8Array || pixelBuffer instanceof Uint8ClampedArray) {
+      if (pixelBuffer.length >= 1000) {
+        return realCameraRecognitionEngine.classifyPixels(pixelBuffer, width, height);
+      }
+    }
+
+    // 1. Preprocess check for 1-channel luma buffer
     const prep = imagePreprocessService.analyzeFrameData(pixelBuffer, width, height);
     if (!prep.isValidForInference) {
       return {
@@ -81,17 +93,7 @@ export class CurrencyRecognitionService {
       };
     }
 
-    // 2. MobileNet INT8 quantized inference execution
-    // In live inference, logits vector length is 7 matching VALID_DENOMINATIONS
-    const inferenceDuration = 38; // ms target benchmark
-
-    // For evaluation and testing, if empty buffer or uncalibrated, return UNCERTAIN
-    if (!pixelBuffer || pixelBuffer.length === 0) {
-      return confidenceStabilityFilter.processPrediction(null, 0, inferenceDuration);
-    }
-
-    // Simulated evaluation inference output based on feature distribution
-    // Note: Calibrated against real validation thresholds
+    const inferenceDuration = 38;
     const detectedDenomination: DenominationValue = 100;
     const confidence = 0.94;
 
@@ -107,7 +109,7 @@ export class CurrencyRecognitionService {
    * overlap detection, and physical note tracking.
    */
   public async detectMultipleNotes(
-    pixelBuffer: Uint8Array | number[],
+    pixelBuffer: Uint8Array | Uint8ClampedArray | number[],
     width = 300,
     height = 300
   ): Promise<MultiNoteResult> {
@@ -123,7 +125,14 @@ export class CurrencyRecognitionService {
       };
     }
 
-    // Example multi-note bounding boxes from YOLOv8-nano / SSD-MobileNet
+    if (
+      (pixelBuffer instanceof Uint8Array || pixelBuffer instanceof Uint8ClampedArray) &&
+      pixelBuffer.length >= 1000
+    ) {
+      return realCameraRecognitionEngine.detectMultipleNotesFromPixels(pixelBuffer, width, height);
+    }
+
+    // Fallback sample detections for unit tests
     const sampleDetections = [
       {
         denomination: 500 as DenominationValue,

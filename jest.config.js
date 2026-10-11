@@ -6,6 +6,7 @@ module.exports = {
   setupFilesAfterEnv: [],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   moduleNameMapper: {
+    '^react-native/setup-env$': '<rootDir>/tests/setup-env-mock.js',
     '^@/(.*)$': '<rootDir>/src/$1',
   },
   testMatch: [

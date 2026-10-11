@@ -1,14 +1,14 @@
-import { DenominationValue, RecognitionStatus, SingleNoteResult } from '../../types/currency';
+import { DenominationValue, SingleNoteResult } from '../../types/currency';
 
 export interface StabilityFilterConfig {
-  minConfidenceThreshold: number; // e.g. 0.85
-  minConsecutiveFrames: number;   // e.g. 3 frames
+  minConfidenceThreshold: number; // e.g. 0.65
+  minConsecutiveFrames: number;   // e.g. 2 frames
   announcementCooldownMs: number; // e.g. 2000 ms
 }
 
 export const DEFAULT_FILTER_CONFIG: StabilityFilterConfig = {
-  minConfidenceThreshold: 0.85,
-  minConsecutiveFrames: 3,
+  minConfidenceThreshold: 0.65,
+  minConsecutiveFrames: 2,
   announcementCooldownMs: 2000,
 };
 
@@ -30,7 +30,8 @@ export class ConfidenceStabilityFilter {
   public processPrediction(
     rawDenomination: DenominationValue | null,
     confidence: number,
-    inferenceTimeMs: number
+    inferenceTimeMs: number,
+    isManualCapture = false
   ): SingleNoteResult {
     const now = Date.now();
 
@@ -42,14 +43,31 @@ export class ConfidenceStabilityFilter {
       return {
         denomination: rawDenomination,
         confidence,
-        status: confidence < 0.5 ? 'FAILED' : 'LOW_CONFIDENCE',
+        status: confidence < 0.4 ? 'FAILED' : 'LOW_CONFIDENCE',
         timestamp: now,
-        modelVersion: 'mobilenet-v3-quant-int8-v1',
+        modelVersion: 'real-camera-color-v2',
         inferenceTimeMs,
       };
     }
 
-    // 2. Check consecutive temporal stability
+    // 2. High confidence or manual single capture confirm immediately
+    if (isManualCapture || confidence >= 0.78) {
+      this.currentCandidate = rawDenomination;
+      this.consecutiveCount = this.config.minConsecutiveFrames;
+      this.lastConfirmedDenomination = rawDenomination;
+      this.lastConfirmedTimestamp = now;
+
+      return {
+        denomination: rawDenomination,
+        confidence,
+        status: 'CONFIRMED',
+        timestamp: now,
+        modelVersion: 'real-camera-color-v2',
+        inferenceTimeMs,
+      };
+    }
+
+    // 3. Temporal consecutive check for lower confidence live frames
     if (this.currentCandidate === rawDenomination) {
       this.consecutiveCount += 1;
     } else {
@@ -57,7 +75,6 @@ export class ConfidenceStabilityFilter {
       this.consecutiveCount = 1;
     }
 
-    // 3. Evaluate if criteria met
     const isStable = this.consecutiveCount >= this.config.minConsecutiveFrames;
 
     if (!isStable) {
@@ -66,7 +83,7 @@ export class ConfidenceStabilityFilter {
         confidence,
         status: 'UNCERTAIN',
         timestamp: now,
-        modelVersion: 'mobilenet-v3-quant-int8-v1',
+        modelVersion: 'real-camera-color-v2',
         inferenceTimeMs,
       };
     }
@@ -80,7 +97,7 @@ export class ConfidenceStabilityFilter {
       confidence,
       status: 'CONFIRMED',
       timestamp: now,
-      modelVersion: 'mobilenet-v3-quant-int8-v1',
+      modelVersion: 'real-camera-color-v2',
       inferenceTimeMs,
     };
   }
@@ -91,7 +108,7 @@ export class ConfidenceStabilityFilter {
       this.lastConfirmedDenomination === denomination &&
       now - this.lastConfirmedTimestamp < this.config.announcementCooldownMs
     ) {
-      return false; // Still within cooldown for same denomination
+      return false;
     }
     return true;
   }

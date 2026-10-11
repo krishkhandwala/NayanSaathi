@@ -3,6 +3,10 @@
  *
  * Real-time Indian currency recognition engine processing actual pixel buffers
  * captured from webcams (browser HTML5 Canvas) and mobile cameras (CameraView takePictureAsync).
+ *
+ * Implements dual-metric recognition:
+ *   1. Hue-Saturation-Lightness (HSL) histogram clustering with tolerant boundary rules
+ *   2. Calibrated RBI reference color vector distance matching
  */
 
 import { DenominationValue, SingleNoteResult, MultiNoteResult } from '../../types/currency';
@@ -11,33 +15,120 @@ import { multipleNoteDetector } from './MultipleNoteDetector';
 import { toByteArray } from 'base64-js';
 import jpeg from 'jpeg-js';
 
-// RBI Mahatma Gandhi New Series colour signatures (HSL)
-interface DenomHueRule {
+export interface DenomProfile {
+  denom: DenominationValue;
+  name: string;
   minH: number;
   maxH: number;
   minS: number;
   maxS?: number;
   minL: number;
   maxL: number;
-  denom: DenominationValue;
-  name: string;
+  // Normalized reference RGB vector for distance matching
+  refR: number;
+  refG: number;
+  refB: number;
 }
 
-const DENOM_RULES: DenomHueRule[] = [
+export const DENOM_PROFILES: DenomProfile[] = [
   // ₹10: Chocolate Brown
-  { minH: 15, maxH: 38, minS: 0.16, maxS: 0.85, minL: 0.15, maxL: 0.58, denom: 10, name: '₹10 (Chocolate Brown)' },
+  {
+    denom: 10,
+    name: '₹10 (Chocolate Brown)',
+    minH: 10,
+    maxH: 45,
+    minS: 0.12,
+    maxS: 0.90,
+    minL: 0.12,
+    maxL: 0.65,
+    refR: 165,
+    refG: 110,
+    refB: 65,
+  },
   // ₹20: Greenish Yellow
-  { minH: 50, maxH: 75, minS: 0.18, maxS: 0.85, minL: 0.25, maxL: 0.70, denom: 20, name: '₹20 (Greenish Yellow)' },
+  {
+    denom: 20,
+    name: '₹20 (Greenish Yellow)',
+    minH: 45,
+    maxH: 85,
+    minS: 0.14,
+    maxS: 0.90,
+    minL: 0.18,
+    maxL: 0.75,
+    refR: 175,
+    refG: 185,
+    refB: 75,
+  },
   // ₹50: Fluorescent Blue / Cyan
-  { minH: 175, maxH: 218, minS: 0.16, maxS: 0.90, minL: 0.22, maxL: 0.75, denom: 50, name: '₹50 (Fluorescent Blue)' },
+  {
+    denom: 50,
+    name: '₹50 (Fluorescent Blue)',
+    minH: 165,
+    maxH: 225,
+    minS: 0.12,
+    maxS: 0.95,
+    minL: 0.18,
+    maxL: 0.80,
+    refR: 70,
+    refG: 180,
+    refB: 215,
+  },
   // ₹100: Lavender / Violet-Purple
-  { minH: 222, maxH: 275, minS: 0.14, maxS: 0.80, minL: 0.24, maxL: 0.75, denom: 100, name: '₹100 (Lavender)' },
-  // ₹200: Bright Orange-Yellow (vivid saturation)
-  { minH: 38, maxH: 49, minS: 0.35, maxS: 0.98, minL: 0.32, maxL: 0.78, denom: 200, name: '₹200 (Bright Yellow)' },
-  // ₹500: Stone Grey (Sage green / grey, notably low saturation)
-  { minH: 68, maxH: 135, minS: 0.04, maxS: 0.24, minL: 0.28, maxL: 0.70, denom: 500, name: '₹500 (Stone Grey)' },
+  {
+    denom: 100,
+    name: '₹100 (Lavender)',
+    minH: 215,
+    maxH: 285,
+    minS: 0.12,
+    maxS: 0.88,
+    minL: 0.18,
+    maxL: 0.82,
+    refR: 165,
+    refG: 155,
+    refB: 215,
+  },
+  // ₹200: Bright Orange-Yellow
+  {
+    denom: 200,
+    name: '₹200 (Bright Yellow)',
+    minH: 32,
+    maxH: 52,
+    minS: 0.26,
+    maxS: 1.0,
+    minL: 0.28,
+    maxL: 0.85,
+    refR: 245,
+    refG: 180,
+    refB: 35,
+  },
+  // ₹500: Stone Grey (Sage green / grey, low saturation)
+  {
+    denom: 500,
+    name: '₹500 (Stone Grey)',
+    minH: 60,
+    maxH: 155,
+    minS: 0.03,
+    maxS: 0.28,
+    minL: 0.22,
+    maxL: 0.78,
+    refR: 135,
+    refG: 145,
+    refB: 130,
+  },
   // ₹2000: Magenta / Deep Rose
-  { minH: 305, maxH: 350, minS: 0.18, maxS: 0.90, minL: 0.25, maxL: 0.75, denom: 2000, name: '₹2000 (Magenta)' },
+  {
+    denom: 2000,
+    name: '₹2000 (Magenta)',
+    minH: 295,
+    maxH: 355,
+    minS: 0.14,
+    maxS: 0.95,
+    minL: 0.18,
+    maxL: 0.82,
+    refR: 215,
+    refG: 70,
+    refB: 150,
+  },
 ];
 
 export function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
@@ -80,19 +171,22 @@ export function analyzePixelRegion(
   pixels: Uint8ClampedArray | Uint8Array,
   width: number,
   height: number,
-  startX = 0.15,
-  endX = 0.85,
-  startY = 0.15,
-  endY = 0.85
+  startX = 0.12,
+  endX = 0.88,
+  startY = 0.12,
+  endY = 0.88
 ): PixelAnalysisResult {
   const x0 = Math.floor(width * startX);
   const x1 = Math.floor(width * endX);
   const y0 = Math.floor(height * startY);
   const y1 = Math.floor(height * endY);
 
-  const step = Math.max(2, Math.floor(Math.sqrt((width * height) / 4000)));
+  const step = Math.max(2, Math.floor(Math.sqrt((width * height) / 4500)));
 
   let totalLuma = 0;
+  let totalR = 0;
+  let totalG = 0;
+  let totalB = 0;
   let sampleCount = 0;
   const denomVotes = new Map<DenominationValue, number>();
 
@@ -105,11 +199,14 @@ export function analyzePixelRegion(
 
       const luma = 0.299 * r + 0.587 * g + 0.114 * b;
       totalLuma += luma;
+      totalR += r;
+      totalG += g;
+      totalB += b;
       sampleCount++;
 
       const [h, s, l] = rgbToHsl(r, g, b);
 
-      for (const rule of DENOM_RULES) {
+      for (const rule of DENOM_PROFILES) {
         if (
           s >= rule.minS &&
           (rule.maxS === undefined || s <= rule.maxS) &&
@@ -123,7 +220,7 @@ export function analyzePixelRegion(
 
           if (hueMatch) {
             denomVotes.set(rule.denom, (denomVotes.get(rule.denom) ?? 0) + 1);
-            break; // Matched first best rule
+            break;
           }
         }
       }
@@ -135,14 +232,14 @@ export function analyzePixelRegion(
   }
 
   const avgLuma = totalLuma / sampleCount;
-  if (avgLuma < 30) {
+  if (avgLuma < 25) {
     return { luma: avgLuma, isTooDark: true, isTooBright: false, detectedDenom: null, confidence: 0 };
   }
-  if (avgLuma > 245) {
+  if (avgLuma > 248) {
     return { luma: avgLuma, isTooDark: false, isTooBright: true, detectedDenom: null, confidence: 0 };
   }
 
-  // Find top matching denomination
+  // 1. Find top vote from HSL clustering
   let topDenom: DenominationValue | null = null;
   let maxVotes = 0;
   let topRuleName: string | undefined;
@@ -151,14 +248,47 @@ export function analyzePixelRegion(
     if (votes > maxVotes) {
       maxVotes = votes;
       topDenom = denom;
-      topRuleName = DENOM_RULES.find((r) => r.denom === denom)?.name;
+      topRuleName = DENOM_PROFILES.find((r) => r.denom === denom)?.name;
     }
   });
 
   const voteRatio = maxVotes / sampleCount;
 
-  // Threshold: at least 14% of sampled note pixels must match the signature
-  if (!topDenom || voteRatio < 0.14) {
+  // 2. Vector distance cross-check
+  const meanR = totalR / sampleCount;
+  const meanG = totalG / sampleCount;
+  const meanB = totalB / sampleCount;
+
+  let bestVectorDenom: DenominationValue | null = null;
+  let bestVectorScore = 0;
+
+  for (const prof of DENOM_PROFILES) {
+    const dr = meanR - prof.refR;
+    const dg = meanG - prof.refG;
+    const db = meanB - prof.refB;
+    const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+    // Max RGB distance ~ 441. Normalizing to similarity (0 to 1)
+    const similarity = Math.max(0, 1 - dist / 220);
+    if (similarity > bestVectorScore) {
+      bestVectorScore = similarity;
+      bestVectorDenom = prof.denom;
+    }
+  }
+
+  // Combined decision: either dominant cluster >= 12% or high vector similarity >= 0.72
+  let finalDenom: DenominationValue | null = null;
+  let finalConfidence = 0;
+
+  if (topDenom && voteRatio >= 0.12) {
+    finalDenom = topDenom;
+    finalConfidence = Math.min(0.98, Math.max(0.72, 0.65 + voteRatio * 0.75));
+  } else if (bestVectorDenom && bestVectorScore >= 0.70) {
+    finalDenom = bestVectorDenom;
+    finalConfidence = Math.min(0.92, bestVectorScore);
+    topRuleName = DENOM_PROFILES.find((r) => r.denom === bestVectorDenom)?.name;
+  }
+
+  if (!finalDenom) {
     return {
       luma: avgLuma,
       isTooDark: false,
@@ -168,15 +298,12 @@ export function analyzePixelRegion(
     };
   }
 
-  // Scale confidence between 0.72 and 0.98 based on density
-  const confidence = Math.min(0.98, Math.max(0.72, 0.65 + voteRatio * 0.75));
-
   return {
     luma: avgLuma,
     isTooDark: false,
     isTooBright: false,
-    detectedDenom: topDenom,
-    confidence,
+    detectedDenom: finalDenom,
+    confidence: finalConfidence,
     dominantColorName: topRuleName,
   };
 }
@@ -188,7 +315,8 @@ export class RealCameraRecognitionEngine {
   public classifyPixels(
     pixels: Uint8ClampedArray | Uint8Array,
     width: number,
-    height: number
+    height: number,
+    isManualCapture = false
   ): SingleNoteResult {
     const startTime = Date.now();
     const analysis = analyzePixelRegion(pixels, width, height);
@@ -219,7 +347,8 @@ export class RealCameraRecognitionEngine {
     return confidenceStabilityFilter.processPrediction(
       analysis.detectedDenom,
       analysis.confidence,
-      inferenceDuration
+      inferenceDuration,
+      isManualCapture
     );
   }
 
@@ -231,8 +360,6 @@ export class RealCameraRecognitionEngine {
     width: number,
     height: number
   ): MultiNoteResult {
-    const startTime = Date.now();
-
     // Check left region
     const leftAnalysis = analyzePixelRegion(pixels, width, height, 0.05, 0.48, 0.15, 0.85);
     // Check right region
@@ -244,7 +371,7 @@ export class RealCameraRecognitionEngine {
       box: { x: number; y: number; width: number; height: number };
     }> = [];
 
-    if (leftAnalysis.detectedDenom && leftAnalysis.confidence >= 0.7) {
+    if (leftAnalysis.detectedDenom && leftAnalysis.confidence >= 0.65) {
       detections.push({
         denomination: leftAnalysis.detectedDenom,
         confidence: leftAnalysis.confidence,
@@ -252,7 +379,7 @@ export class RealCameraRecognitionEngine {
       });
     }
 
-    if (rightAnalysis.detectedDenom && rightAnalysis.confidence >= 0.7) {
+    if (rightAnalysis.detectedDenom && rightAnalysis.confidence >= 0.65) {
       detections.push({
         denomination: rightAnalysis.detectedDenom,
         confidence: rightAnalysis.confidence,
@@ -263,7 +390,7 @@ export class RealCameraRecognitionEngine {
     // If both regions empty, try full center
     if (detections.length === 0) {
       const center = analyzePixelRegion(pixels, width, height);
-      if (center.detectedDenom && center.confidence >= 0.7) {
+      if (center.detectedDenom && center.confidence >= 0.65) {
         detections.push({
           denomination: center.detectedDenom,
           confidence: center.confidence,

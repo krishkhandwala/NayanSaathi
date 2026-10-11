@@ -134,7 +134,7 @@ export default function ScannerScreen() {
   }, []);
 
   // Core Frame Processor
-  const processCurrentFrame = useCallback(async () => {
+  const processCurrentFrame = useCallback(async (isManual = false) => {
     if (isPaused || isBusyRef.current) return;
     isBusyRef.current = true;
     setIsProcessing(true);
@@ -149,6 +149,9 @@ export default function ScannerScreen() {
       }
 
       if (!frameData) {
+        if (isManual) {
+          announce('Camera is warming up. Please hold note steady and try again in a moment.', 'HIGH');
+        }
         isBusyRef.current = false;
         setIsProcessing(false);
         return;
@@ -176,15 +179,18 @@ export default function ScannerScreen() {
 
       if (!isMultiMode) {
         // Single note classification
-        const res = realCameraRecognitionEngine.classifyPixels(pixels, width, height);
+        const res = realCameraRecognitionEngine.classifyPixels(pixels, width, height, isManual);
         setLatestSingleResult(res);
 
         if (res.status === 'CONFIRMED' && res.denomination) {
           hapticsService.trigger('SUCCESS');
-          announce(t('note_identified', { denomination: res.denomination }), 'HIGH');
-        } else if (res.status === 'LOW_CONFIDENCE' || res.status === 'UNCERTAIN') {
+          announce(`₹${res.denomination} note identified. Tap Add to Wallet or speak Add to Wallet.`, 'HIGH', true);
+        } else if (isManual) {
           if (res.denomination) {
             hapticsService.trigger('UNCERTAIN');
+            announce(`Possible ₹${res.denomination} detected. Hold slightly closer and steady to confirm.`, 'HIGH', true);
+          } else {
+            announce('No note detected. Place currency note in center of camera and tap scan again.', 'HIGH', true);
           }
         }
       } else {
@@ -206,8 +212,11 @@ export default function ScannerScreen() {
               count: mRes.confirmedCount,
               total: mRes.totalValue,
             }),
-            'HIGH'
+            'HIGH',
+            true
           );
+        } else if (isManual) {
+          announce('No scattered notes detected. Align notes in camera view.', 'HIGH', true);
         }
       }
     } catch (err) {
@@ -223,10 +232,10 @@ export default function ScannerScreen() {
     motionSensorService.startListening();
     announce(t('scanner_status_ready'), 'HIGH');
 
-    // On web run every 600ms; on mobile every 1200ms to balance accuracy and battery
-    const intervalMs = Platform.OS === 'web' ? 600 : 1200;
+    // On web run every 500ms; on mobile every 1000ms
+    const intervalMs = Platform.OS === 'web' ? 500 : 1000;
     scanIntervalRef.current = setInterval(() => {
-      processCurrentFrame();
+      processCurrentFrame(false);
     }, intervalMs);
 
     return () => {
@@ -408,7 +417,7 @@ export default function ScannerScreen() {
         <AccessibleButton
           label="📸 Scan Note Now"
           accessibilityHint="Captures the current camera frame and scans for currency notes"
-          onPress={processCurrentFrame}
+          onPress={() => processCurrentFrame(true)}
           variant="primary"
           style={{ marginBottom: 8 }}
         />
@@ -460,11 +469,27 @@ export default function ScannerScreen() {
             style={styles.halfBtn}
           />
 
-          {/* Quick Demo Button for desktop testing */}
           <AccessibleButton
-            label="Test ₹100"
+            label="Sample ₹100"
             accessibilityHint="Simulates detecting a ₹100 note for verification"
             onPress={() => handleTestSimulate(100)}
+            variant="outline"
+            style={styles.halfBtn}
+          />
+        </View>
+
+        <View style={[styles.actionRow, { marginTop: 6 }]}>
+          <AccessibleButton
+            label="Sample ₹50"
+            accessibilityHint="Simulates detecting a ₹50 note for verification"
+            onPress={() => handleTestSimulate(50)}
+            variant="outline"
+            style={styles.halfBtn}
+          />
+          <AccessibleButton
+            label="Sample ₹500"
+            accessibilityHint="Simulates detecting a ₹500 note for verification"
+            onPress={() => handleTestSimulate(500)}
             variant="outline"
             style={styles.halfBtn}
           />

@@ -1,4 +1,5 @@
 import * as Speech from 'expo-speech';
+import { Platform } from 'react-native';
 import { AnnouncementPriority, AudioAnnouncement } from '../../types/speech';
 import { SupportedLanguage } from '../../types/settings';
 
@@ -24,14 +25,13 @@ export class AudioFeedbackService {
   private speechRate = 1.0;
   private lastAnnouncementText = '';
   private lastAnnouncementTime = 0;
-  private readonly duplicateCooldownMs = 2000; // 2 seconds cooldown as required by SRS
+  private readonly duplicateCooldownMs = 1500;
 
   public setLanguage(lang: SupportedLanguage): void {
     this.currentLanguage = lang;
   }
 
   public setSpeechRate(rate: number): void {
-    // Normal bounds between 0.8 and 1.2
     this.speechRate = Math.max(0.7, Math.min(1.5, rate));
   }
 
@@ -54,7 +54,7 @@ export class AudioFeedbackService {
       return;
     }
 
-    if (cancelPrevious || priority === 'CRITICAL') {
+    if (cancelPrevious || priority === 'CRITICAL' || priority === 'HIGH') {
       await this.stop();
       this.queue = [];
     }
@@ -67,7 +67,6 @@ export class AudioFeedbackService {
       cancelPrevious,
     };
 
-    // If queue has items, insert by priority rank
     this.insertByPriority(announcement);
     this.processQueue();
   }
@@ -99,6 +98,33 @@ export class AudioFeedbackService {
 
     const voiceLocale = LANGUAGE_VOICE_MAP[this.currentLanguage] || 'en-IN';
 
+    // 1. Direct Web Speech Synthesis on Browser
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(next.text);
+        utterance.lang = voiceLocale;
+        utterance.rate = this.speechRate;
+        utterance.volume = 1.0;
+
+        utterance.onend = () => {
+          this.isSpeaking = false;
+          this.processQueue();
+        };
+
+        utterance.onerror = () => {
+          this.isSpeaking = false;
+          this.processQueue();
+        };
+
+        window.speechSynthesis.speak(utterance);
+        return;
+      } catch (err) {
+        console.warn('[TTS] Web speech synthesis failed, falling back:', err);
+      }
+    }
+
+    // 2. Native Expo Speech on iOS / Android
     try {
       Speech.speak(next.text, {
         language: voiceLocale,
@@ -123,6 +149,14 @@ export class AudioFeedbackService {
   }
 
   public async stop(): Promise<void> {
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // Ignored
+      }
+    }
+
     try {
       await Speech.stop();
     } catch {

@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import { VoiceCommand, VoiceIntentType } from '../../types/speech';
 import { SupportedLanguage } from '../../types/settings';
 import { SUPPORTED_LANGUAGES } from '../../constants/languages';
@@ -12,17 +13,17 @@ const INTENT_RULES: IntentRule[] = [
   {
     intent: 'START_SCANNING',
     regexPatterns: [
-      /\b(start\s+(scanning|counting)|scan\s+notes?)\b/i,
-      /(स्कैन\s*(शुरू|चालू)|गिनना\s*शुरू)/i,
-      /(ஸ்கேன்\s*தொடங்கு|எண்ண\s*தொடங்கு)/i,
-      /(स्कॅन\s*(सुरू|करा)|मोजणे\s*सुरू)/i,
-      /(স্ক্যান\s*শুরু|গণনা\s*শুরু)/i,
+      /\b(start(\s+(scanning|counting))?|scan(\s+notes?)?|camera|open\s+scanner|check\s+note)\b/i,
+      /(स्कैन\s*(शुरू|चालू|करें)?|गिनना\s*शुरू|कैमरा|नोट\s*जांचें)/i,
+      /(ஸ்கேன்\s*தொடங்கு|எண்ண\s*தொடங்கு|கேமரா)/i,
+      /(स्कॅन\s*(सुरू|करा)|मोजणे\s*सुरू|कॅमेरा)/i,
+      /(স্ক্যান\s*শুরু|গণনা\s*শুরু|ক্যামেরা)/i,
     ],
   },
   {
     intent: 'STOP_SCANNING',
     regexPatterns: [
-      /\b(stop(\s+scanning)?|pause|halt)\b/i,
+      /\b(stop(\s+scanning)?|pause|halt|freeze)\b/i,
       /(रोकें|बंद\s*करें|रोको)/i,
       /(நிறுத்து|நில்)/i,
       /(थांबवा|बंद\s*करा)/i,
@@ -32,18 +33,18 @@ const INTENT_RULES: IntentRule[] = [
   {
     intent: 'QUERY_TOTAL',
     regexPatterns: [
-      /\b(what\s+is\s+(my\s+)?total|total(\s+amount)?|how\s+much(\s+cash)?)\b/i,
-      /(कुल\s*(कितना|बताओ|रुपये)|कितने\s*पैसे)/i,
-      /(மொத்தம்\s*என்ன|மொத்த\s*தொகை)/i,
-      /(एकूण\s*(किती|रक्कम))/i,
-      /(মোট\s*(কত|টাকা))/i,
+      /\b(what\s+is\s+(my\s+)?total|total(\s+amount)?|how\s+much(\s+cash|\s+money)?|balance|check\s+balance|my\s+cash)\b/i,
+      /(कुल\s*(कितना|बताओ|रुपये)|कितने\s*(पैसे|रुपये)|बैलेंस)/i,
+      /(மொத்தம்\s*என்ன|மொத்த\s*தொகை|மீதி)/i,
+      /(एकूण\s*(किती|रक्कम)|शिल्लक)/i,
+      /(মোট\s*(কত|টাকা)|ব্যালেন্স)/i,
     ],
   },
   {
     intent: 'CLEAR_WALLET',
     regexPatterns: [
-      /\b(clear(\s+wallet|\s+cash)?|empty\s+wallet|reset(\s+wallet)?)\b/i,
-      /(वॉलेट\s*खाली\s*करें|साफ\s*करें)/i,
+      /\b(clear(\s+wallet|\s+cash)?|empty\s+wallet|reset(\s+wallet|\s+cash)?)\b/i,
+      /(वॉलेट\s*खाली\s*करें|साफ\s*करें|रीसेट)/i,
       /(பையை\s*அழி|காலியாக்கு)/i,
       /(पाकीट\s*रिकामे\s*करा)/i,
       /(ওয়ালেট\s*খালি\s*করুন)/i,
@@ -62,7 +63,7 @@ const INTENT_RULES: IntentRule[] = [
   {
     intent: 'UNDO_LAST',
     regexPatterns: [
-      /\b(undo(\s+last)?|remove\s+last|delete\s+last)\b/i,
+      /\b(undo(\s+last)?|remove\s+last(\s+note)?|delete\s+last)\b/i,
       /(अंतिम\s*हटाओ|वापस\s*लो|पिछला\s*हटाओ)/i,
       /(கடைசியை\s*நீக்கு|மீட்டெடு)/i,
       /(शेवटचे\s*काढा|मागे\s*घ्या)/i,
@@ -113,10 +114,10 @@ const INTENT_RULES: IntentRule[] = [
   {
     intent: 'HELP',
     regexPatterns: [
-      /\b(what\s+can\s+i\s+say|help|command\s+list|instructions)\b/i,
+      /\b(what\s+can\s+i\s+say|help(\s+me)?|command\s+list|instructions|what\s+to\s+say)\b/i,
       /(मैं\s*क्या\s*बोल\s*सकता\s*हूँ|सहायता|मदद)/i,
       /(உதவி|என்ன\s*சொல்லலாம்)/i,
-      /(मी\s*काय\s*बोलू\s*शकतो|मदत)/i,
+      /(மீ\s*काय\s*बोलू\s*शकतो|मदत)/i,
       /(আমি\s*কি\s*বলতে\s*পারি|সাহায্য)/i,
     ],
   },
@@ -140,18 +141,27 @@ const WORD_NUMBERS: Record<string, number> = {
 export class VoiceCommandService {
   private isListeningActive = false;
   private currentLanguage: SupportedLanguage = 'en';
+  private webRecognition: any = null;
 
   public async initialize(): Promise<void> {
-    // Platform speech recognition adapter hook
     this.isListeningActive = false;
   }
 
   public setLanguage(lang: SupportedLanguage): void {
     this.currentLanguage = lang;
+    if (this.webRecognition) {
+      const locales: Record<SupportedLanguage, string> = {
+        en: 'en-IN',
+        hi: 'hi-IN',
+        ta: 'ta-IN',
+        mr: 'mr-IN',
+        bn: 'bn-IN',
+      };
+      this.webRecognition.lang = locales[lang] || 'en-IN';
+    }
   }
 
   public isOfflineReady(): boolean {
-    // English and Hindi offline recognition capability
     return SUPPORTED_LANGUAGES[this.currentLanguage]?.offlineSpeechRecognitionAvailable ?? false;
   }
 
@@ -213,13 +223,11 @@ export class VoiceCommandService {
   }
 
   private extractNumber(text: string): number | undefined {
-    // Check digit match (2 to 20)
     const digitMatch = text.match(/\b([2-9]|1[0-9]|20)\b/);
     if (digitMatch) {
       return parseInt(digitMatch[1], 10);
     }
 
-    // Check english word match
     for (const [word, val] of Object.entries(WORD_NUMBERS)) {
       if (text.includes(word)) {
         return val;
@@ -229,13 +237,81 @@ export class VoiceCommandService {
     return undefined;
   }
 
-  public startListening(onCommand: (cmd: VoiceCommand) => void): void {
+  /**
+   * Start listening for microphone input.
+   * On Web browsers, uses Web Speech API (webkitSpeechRecognition / SpeechRecognition).
+   */
+  public startListening(
+    onCommand: (cmd: VoiceCommand) => void,
+    onError?: (errorText: string) => void
+  ): boolean {
     this.isListeningActive = true;
-    // In production, attaches to native speech recognition event listener
+
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const SpeechRecognition =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+      if (SpeechRecognition) {
+        try {
+          if (this.webRecognition) {
+            try {
+              this.webRecognition.abort();
+            } catch {}
+          }
+
+          const recognition = new SpeechRecognition();
+          const locales: Record<SupportedLanguage, string> = {
+            en: 'en-IN',
+            hi: 'hi-IN',
+            ta: 'ta-IN',
+            mr: 'mr-IN',
+            bn: 'bn-IN',
+          };
+          recognition.lang = locales[this.currentLanguage] || 'en-IN';
+          recognition.continuous = false;
+          recognition.interimResults = false;
+
+          recognition.onresult = (event: any) => {
+            const transcript = event.results?.[0]?.[0]?.transcript || '';
+            this.isListeningActive = false;
+            const cmd = this.parseCommand(transcript);
+            onCommand(cmd);
+          };
+
+          recognition.onerror = (err: any) => {
+            this.isListeningActive = false;
+            if (onError) {
+              onError(err.error || 'Speech recognition error');
+            }
+          };
+
+          recognition.onend = () => {
+            this.isListeningActive = false;
+          };
+
+          this.webRecognition = recognition;
+          recognition.start();
+          return true;
+        } catch (e: any) {
+          console.warn('[VoiceCommand] Web SpeechRecognition start error:', e);
+          this.isListeningActive = false;
+          if (onError) onError(e?.message || 'Could not start microphone');
+          return false;
+        }
+      }
+    }
+
+    return false;
   }
 
   public stopListening(): void {
     this.isListeningActive = false;
+    if (this.webRecognition) {
+      try {
+        this.webRecognition.stop();
+      } catch {}
+      this.webRecognition = null;
+    }
   }
 
   public isListening(): boolean {

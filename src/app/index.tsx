@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, Redirect } from 'expo-router';
 import { useApp } from '../state/AppContext';
 import { AccessibleButton } from '../components/AccessibleButton';
 import { WalletSummary } from '../components/WalletSummary';
@@ -13,18 +13,18 @@ export default function HomeScreen() {
   const { preferences, theme, modelStatus, announce } = useApp();
 
   useEffect(() => {
-    // If onboarding not completed, route to onboarding flow
-    if (!preferences.onboardingCompleted) {
-      router.replace('/onboarding');
-      return;
+    if (preferences.onboardingCompleted) {
+      announce(
+        `${t('app_name')}. ${t('home_wallet_heading')}.`,
+        'NORMAL'
+      );
     }
-
-    // Announce home screen arrival politely to screen readers
-    announce(
-      `${t('app_name')}. ${t('home_wallet_heading')}.`,
-      'NORMAL'
-    );
   }, [preferences.onboardingCompleted]);
+
+  // If onboarding not completed, safely redirect via Expo Router component
+  if (!preferences.onboardingCompleted) {
+    return <Redirect href="/onboarding" />;
+  }
 
   return (
     <ScrollView

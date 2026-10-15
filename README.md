@@ -1,5 +1,6 @@
 # NayanSaathi (नयनसाथी)
 ### Cross-Platform, Offline-First Currency Recognition & Cash Assistant for Blind and Visually Impaired Users
+Published App Now Available
 
 [![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20iOS-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)]()
